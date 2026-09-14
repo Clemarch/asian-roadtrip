@@ -440,7 +440,8 @@ function plain(txt,n){
 var COLS=["countries","bookings","guide","stays","inbox"];
 var GH={owner:"Clemarch",repo:"asian-roadtrip-data",branch:"main",path:"data/trip.json",
   patches:"data/patches",digest:"data/voyage.md",token:""};
-var ST={sha:null,pushing:false,again:false,state:"boot",err:"",last:0,me:"",timer:null,poll:null};
+var ST={sha:null,pushing:false,again:false,state:"boot",err:"",last:0,me:"",timer:null,poll:null,
+  mailerr:"",after:[]};
 
 function ghSave(){try{localStorage.setItem("ar-gh",JSON.stringify(
   {owner:GH.owner,repo:GH.repo,branch:GH.branch,path:GH.path,token:GH.token}));}catch(e){}}
@@ -524,7 +525,8 @@ function schedulePush(){
   setState("dirty");
   clearTimeout(ST.timer);ST.timer=setTimeout(push,1200);
 }
-function push(){
+function push(after){
+  if(after)ST.after=(ST.after||[]).concat([after]);
   if(!GH.token){setState("local");return;}
   if(ST.pushing){ST.again=true;return;}
   ST.pushing=true;setState("push");
@@ -550,6 +552,8 @@ function push(){
     return r.json().then(function(j){
       ST.pushing=false;ST.sha=(j.content&&j.content.sha)||ST.sha;ST.last=Date.now();
       cacheSave();
+      var cbs=ST.after||[];ST.after=[];
+      cbs.forEach(function(fn){try{fn();}catch(e){}});
       if(ST.again){ST.again=false;push();}else {setState("ok");writeDigest();}
     });
   }).catch(function(){ST.pushing=false;setState("offline");retry();});
@@ -563,11 +567,11 @@ function pull(force){
       setState("auth","GitHub refuse le jeton : expire, revoque, ou sans droit sur le depot.");return;}
     if(!r.ok){setState("offline");return;}
     return r.json().then(function(j){
-      if(j.sha===ST.sha&&!force){ST.last=Date.now();setState("ok");readMailbox();return;}
+      if(j.sha===ST.sha&&!force){ST.last=Date.now();setState("ok");ensureDigest();readMailbox();return;}
       ST.sha=j.sha;
       mergeTrip(JSON.parse(b64d(j.content)),false);
       cacheSave();ST.last=Date.now();S.ready=true;setState("ok");render();
-      readMailbox();
+      ensureDigest();readMailbox();
     });
   }).catch(function(){setState("offline");});
 }
@@ -578,7 +582,8 @@ function seedRepo(){
     if(!r.ok){setState("offline");return;}
     return r.json().then(function(j){
       ST.sha=j.content&&j.content.sha;ST.last=Date.now();cacheSave();setState("ok");
-      toast("Voyage publie dans le depot partage.");});
+      writeDigest();
+      toast("Voyage publi\u00e9 dans le carnet partag\u00e9.");});
   }).catch(function(){setState("offline");});
 }
 /* ---- boite aux lettres : fichiers deposes dans data/patches par une IA ----
@@ -596,14 +601,27 @@ function readMailbox(){
     var files=list.filter(function(f){return f.type==="file"&&/\.json$/i.test(f.name);})
                   .sort(function(a,b){return a.name<b.name?-1:1;}).slice(0,10);
     if(!files.length){MAILBUSY=false;return;}
-    var applied=0,seen=0;
-    function next(i){
-      if(i>=files.length){
-        MAILBUSY=false;
-        if(applied){render();toast(applied+(applied>1?" mises à jour reçues.":" mise à jour reçue."));}
-        else if(seen)toast("Message reçu mais illisible — voir Synchronisation.");
+    var applied=0,seen=0,done=[];
+    function finish(){
+      MAILBUSY=false;
+      if(!applied){
+        if(seen)toast("Message re\u00e7u mais illisible \u2014 voir Synchronisation.");
         return;
       }
+      render();
+      /* on ne supprime les messages qu'une fois le voyage renvoye au depot,
+         sinon une fermeture de l'app entre les deux perdrait la modification */
+      clearTimeout(ST.timer);
+      push(function(){
+        done.forEach(function(f){
+          api("/contents/"+encodeURIComponent(f.path),{method:"DELETE",body:JSON.stringify(
+            {message:"patch appliqu\u00e9 : "+f.name,sha:f.sha,branch:GH.branch})}).catch(function(){});
+        });
+      });
+      toast(applied+(applied>1?" mises \u00e0 jour re\u00e7ues.":" mise \u00e0 jour re\u00e7ue."));
+    }
+    function next(i){
+      if(i>=files.length){finish();return;}
       var f=files[i];
       fetch(f.download_url?f.download_url:("https://api.github.com/repos/"+GH.owner+"/"+GH.repo+
         "/contents/"+encodeURIComponent(f.path)+"?ref="+encodeURIComponent(GH.branch)),
@@ -612,17 +630,24 @@ function readMailbox(){
       .then(function(txt){
         seen++;
         var res=applyPatch(txt);
-        if(res&&res.err){ST.mailerr="Fichier "+f.name+" : "+res.err;}
-        else {applied+=(res&&res.n)||0;
-          return api("/contents/"+encodeURIComponent(f.path),{method:"DELETE",body:JSON.stringify(
-            {message:"patch applique : "+f.name,sha:f.sha,branch:GH.branch})}).catch(function(){});}
+        if(res&&res.err)ST.mailerr="Fichier "+f.name+" : "+res.err;
+        else {applied+=(res&&res.n)||0;done.push(f);}
       }).catch(function(){}).then(function(){next(i+1);});
     }
     next(0);
   }).catch(function(){MAILBUSY=false;});
 }
 /* ---- miroir lisible du voyage, pour que n'importe quelle IA puisse le lire ---- */
-var DIGSHA=null,DIGLAST="";
+var DIGSHA=null,DIGLAST="",DIGCHECKED=false;
+function ensureDigest(){
+  if(DIGCHECKED||!GH.token)return;
+  DIGCHECKED=true;
+  api("/contents/"+GH.digest+"?ref="+encodeURIComponent(GH.branch)).then(function(r){
+    if(r.status===404){writeDigest();return;}
+    if(!r.ok)return;
+    return r.json().then(function(j){DIGSHA=j.sha;});
+  }).catch(function(){});
+}
 function writeDigest(){
   if(!GH.token)return;
   var md=makeDigest();
