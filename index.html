@@ -441,7 +441,7 @@ var COLS=["countries","bookings","guide","stays","inbox"];
 var GH={owner:"Clemarch",repo:"asian-roadtrip-data",branch:"main",path:"data/trip.json",
   patches:"data/patches",digest:"data/voyage.md",token:""};
 var ST={sha:null,pushing:false,again:false,state:"boot",err:"",last:0,me:"",timer:null,poll:null,
-  mailerr:"",after:[]};
+  mailerr:"",after:[],unsent:false};
 
 function ghSave(){try{localStorage.setItem("ar-gh",JSON.stringify(
   {owner:GH.owner,repo:GH.repo,branch:GH.branch,path:GH.path,token:GH.token}));}catch(e){}}
@@ -520,6 +520,7 @@ function cacheLoad(){try{var c=JSON.parse(localStorage.getItem("ar-cache")||"nul
   if(c&&c.t){ST.sha=c.sha||null;mergeTrip(c.t,false);return true;}}catch(e){}return false;}
 function setState(k,msg){ST.state=k;ST.err=msg||"";syncUI();}
 function schedulePush(){
+  ST.unsent=true;
   cacheSave();
   if(!GH.token){setState("local");return;}
   setState("dirty");
@@ -550,7 +551,7 @@ function push(after){
       setState("auth","GitHub refuse le jeton : expire, revoque, ou sans droit d'ecriture sur le depot.");return;}
     if(!r.ok){ST.pushing=false;setState("offline");retry();return;}
     return r.json().then(function(j){
-      ST.pushing=false;ST.sha=(j.content&&j.content.sha)||ST.sha;ST.last=Date.now();
+      ST.pushing=false;ST.sha=(j.content&&j.content.sha)||ST.sha;ST.unsent=false;ST.last=Date.now();
       cacheSave();
       var cbs=ST.after||[];ST.after=[];
       cbs.forEach(function(fn){try{fn();}catch(e){}});
@@ -560,7 +561,9 @@ function push(after){
 }
 function pull(force){
   if(!GH.token)return Promise.resolve();
-  if(ST.pushing||ST.state==="dirty"||ST.state==="push")return Promise.resolve();
+  /* tant qu'une modification locale n'est pas confirmee cote depot, on ne relit rien :
+     sinon un envoi rate suivi d'une relecture ecrasait silencieusement le travail */
+  if(ST.pushing||ST.unsent||ST.state==="dirty"||ST.state==="push")return Promise.resolve();
   return api("/contents/"+GH.path+"?ref="+encodeURIComponent(GH.branch)).then(function(r){
     if(r.status===404)return seedRepo();
     if(r.status===401||r.status===403){
@@ -569,7 +572,7 @@ function pull(force){
     return r.json().then(function(j){
       if(j.sha===ST.sha&&!force){ST.last=Date.now();setState("ok");ensureDigest();readMailbox();return;}
       ST.sha=j.sha;
-      mergeTrip(JSON.parse(b64d(j.content)),false);
+      mergeTrip(JSON.parse(b64d(j.content)),true);
       cacheSave();ST.last=Date.now();S.ready=true;setState("ok");render();
       ensureDigest();readMailbox();
     });
@@ -1894,8 +1897,8 @@ function boot(){
     pull(true);
     ST.poll=setInterval(function(){if(!document.hidden)pull();},30000);
     document.addEventListener("visibilitychange",function(){
-      if(!document.hidden){ if(ST.state==="dirty"||ST.state==="offline")push(); else pull(); }});
-    window.addEventListener("online",function(){ if(ST.state==="offline")push(); else pull(); });
+      if(!document.hidden){ if(ST.unsent||ST.state==="dirty"||ST.state==="offline")push(); else pull(); }});
+    window.addEventListener("online",function(){ if(ST.unsent||ST.state==="offline")push(); else pull(); });
   }
 }
 boot();
